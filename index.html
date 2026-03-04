@@ -1722,30 +1722,40 @@ async function startAnalysis(file){
 
 async function uploadToGemini(key,file,onProgress){
   const mime=file.type||'video/mp4';
+
+  // ── PASO 1: iniciar subida resumible ──
+  // Nota: usamos x-goog-api-key como header (igual que el SDK oficial) en vez de URL param,
+  // y eliminamos X-Goog-Upload-Header-* que no son necesarios y rompen CORS en Safari.
   let initResp;
   try{
     initResp=await fetch(
-      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${key}`,
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable`,
       {method:'POST',
-       headers:{'X-Goog-Upload-Protocol':'resumable','X-Goog-Upload-Command':'start',
-                 'X-Goog-Upload-Header-Content-Length':''+file.size,
-                 'X-Goog-Upload-Header-Content-Type':mime,
-                 'Content-Type':'application/json'},
-       body:JSON.stringify({file:{display_name:file.name}})}
+       headers:{
+         'x-goog-api-key': key,
+         'X-Goog-Upload-Protocol': 'resumable',
+         'X-Goog-Upload-Command': 'start',
+         'Content-Type': 'application/json'
+       },
+       body:JSON.stringify({file:{display_name:file.name, mimeType:mime}})}
     );
   }catch(netErr){
     if(!navigator.onLine) throw new Error('Sin conexión a internet. Conectate y volvé a intentar.');
-    throw new Error('No se pudo conectar a Gemini ('+netErr.message+'). Verificá que la API Key esté activa en Google AI Studio.');
+    throw new Error('No se pudo conectar a Gemini. Verificá tu conexión e intentá de nuevo. ('+netErr.message+')');
   }
   if(!initResp.ok){
     const errBody=await initResp.text().catch(()=>'');
-    if(initResp.status===400) throw new Error('API Key inválida o solicitud incorrecta. Revisá la key en Ajustes.');
-    if(initResp.status===403) throw new Error('API Key sin permisos. Verificá que esté habilitada en Google AI Studio.');
-    throw new Error(`Error al iniciar subida (${initResp.status}): ${errBody.slice(0,120)}`);
+    if(initResp.status===400) throw new Error('API Key inválida. Revisá que la copiaste completa en ⚙️ Ajustes.');
+    if(initResp.status===401) throw new Error('API Key inválida o vencida. Generá una nueva en Google AI Studio.');
+    if(initResp.status===403) throw new Error('API Key sin permisos para usar la File API. En Google AI Studio verificá que el proyecto tenga la Generative Language API habilitada.');
+    if(initResp.status===429) throw new Error('Límite de requests alcanzado. Esperá un minuto y volvé a intentar.');
+    throw new Error(`Error iniciando subida (${initResp.status}): ${errBody.slice(0,120)}`);
   }
   const uploadUrl=initResp.headers.get('X-Goog-Upload-URL');
-  if(!uploadUrl) throw new Error('No se recibió URL de subida de Gemini');
-  const CHUNK=8*1024*1024;
+  if(!uploadUrl) throw new Error('Gemini no devolvió URL de subida. Intentá de nuevo.');
+
+  // ── PASO 2: subir el archivo en chunks ──
+  const CHUNK=8*1024*1024; // 8 MB por chunk
   let offset=0, fileUri=null;
   while(offset<file.size){
     const chunk=file.slice(offset,offset+CHUNK);
@@ -1754,24 +1764,26 @@ async function uploadToGemini(key,file,onProgress){
     try{
       resp=await fetch(uploadUrl,{
         method:'PUT',
-        headers:{'X-Goog-Upload-Offset':''+offset,
-                 'X-Goog-Upload-Command':isLast?'upload, finalize':'upload',
-                 'Content-Type':mime},
+        headers:{
+          'X-Goog-Upload-Offset':''+offset,
+          'X-Goog-Upload-Command':isLast?'upload, finalize':'upload',
+          'Content-Type':mime
+        },
         body:chunk
       });
     }catch(netErr){
-      throw new Error(`Error de red subiendo el video (${Math.round(offset/file.size*100)}% completado). Intentá de nuevo.`);
+      throw new Error(`Se cortó la conexión al ${Math.round(offset/file.size*100)}%. Intentá de nuevo con mejor señal.`);
     }
     offset+=chunk.size;
     if(onProgress) onProgress(Math.round(offset/file.size*100));
     if(isLast){
       if(!resp.ok){
         const errBody=await resp.text().catch(()=>'');
-        throw new Error(`Subida fallida (${resp.status}): ${errBody.slice(0,120)}`);
+        throw new Error(`Subida fallida en el último paso (${resp.status}): ${errBody.slice(0,120)}`);
       }
       const json=await resp.json();
       fileUri=json.file?.uri;
-      if(!fileUri) throw new Error('Gemini no devolvió URI del archivo. Intentá con un video más corto.');
+      if(!fileUri) throw new Error('Gemini no devolvió URI del archivo. Intentá con un video más corto o en otro formato.');
     }
   }
   return fileUri;
@@ -1780,14 +1792,15 @@ async function uploadToGemini(key,file,onProgress){
 async function waitForActive(key,fileUri){
   const name=fileUri.split('/files/')[1]||fileUri.split('/').pop();
   for(let i=0;i<40;i++){
-    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/files/${name}?key=${key}`);
-    if(!r.ok) throw new Error('Error verificando estado del archivo');
+    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/files/${name}`,
+      {headers:{'x-goog-api-key':key}});
+    if(!r.ok) throw new Error('Error verificando estado del archivo ('+r.status+')');
     const f=await r.json();
     if(f.state==='ACTIVE') return;
-    if(f.state==='FAILED') throw new Error('Gemini no pudo procesar el video');
+    if(f.state==='FAILED') throw new Error('Gemini no pudo procesar el video. Intentá con otro formato (MP4 recomendado).');
     await new Promise(res=>setTimeout(res,5000));
   }
-  throw new Error('Timeout: Gemini tardó demasiado en procesar el video');
+  throw new Error('Timeout: Gemini tardó demasiado. El video puede ser muy largo.');
 }
 
 async function callGemini(key,fileUri,match,focusPlayer,context){
@@ -1832,8 +1845,8 @@ No incluyas ningún texto fuera del JSON. No uses markdown ni bloques de código
     generationConfig:{responseMimeType:'application/json',temperature:0.25}
   };
   const r=await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,
-    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`,
+    {method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':key},body:JSON.stringify(body)}
   );
   if(!r.ok){
     const err=await r.text();
@@ -1967,23 +1980,30 @@ async function testFirebaseUrl(){
   res.style.display='block';
   if(!raw){ res.style.color='var(--gray)'; res.textContent='⚠️ Ingresá una URL primero.'; return; }
   if(!raw.startsWith('https://')){ res.style.color='var(--red)'; res.textContent='❌ La URL debe empezar con https://'; return; }
-  res.style.color='var(--gray)'; res.textContent='🔄 Probando…';
+  res.style.color='var(--gray)'; res.textContent='🔄 Probando conexión…';
+  const ac=new AbortController();
+  const tid=setTimeout(()=>ac.abort(),8000);
   try{
-    const r=await fetch(`${raw}/.json?shallow=true`,{signal:AbortSignal.timeout(8000)});
+    const r=await fetch(`${raw}/.json?shallow=true`,{signal:ac.signal});
+    clearTimeout(tid);
     if(r.status===401||r.status===403){
       res.style.color='var(--red)';
-      res.textContent='❌ Acceso denegado ('+r.status+'). Revisá las reglas de seguridad en Firebase Console → Realtime Database → Rules. Deben ser: .read: true, .write: true';
+      res.innerHTML='❌ Conectado pero acceso denegado ('+r.status+'). Cambiá las reglas en:<br>'
+        +'<b>Firebase Console → Realtime Database → Rules</b><br>Pegá esto y publicá:'
+        +'<code style="display:block;margin-top:5px;padding:7px;background:#0d1117;border-radius:6px;font-size:10px;white-space:pre-wrap;">{\n  "rules": {\n    ".read": true,\n    ".write": true\n  }\n}</code>';
     } else if(r.ok){
       res.style.color='#2ea043';
-      res.textContent='✅ Conexión OK! La URL es correcta.';
+      res.textContent='✅ ¡Conexión OK! La URL es correcta y las reglas permiten acceso.';
     } else {
       res.style.color='var(--red)';
-      res.textContent='❌ Error '+r.status+'. Verificá que la URL sea correcta.';
+      res.textContent='❌ Error HTTP '+r.status+'. Verificá que la URL sea exactamente la de tu proyecto en Firebase Console.';
     }
   }catch(e){
+    clearTimeout(tid);
     res.style.color='var(--red)';
-    if(!navigator.onLine) res.textContent='❌ Sin internet en este momento.';
-    else res.textContent='❌ No se pudo conectar. URL incorrecta o sin internet. ('+e.message+')';
+    if(e.name==='AbortError') res.textContent='❌ Tiempo agotado (8s). Verificá la URL o tu conexión a internet.';
+    else if(!navigator.onLine) res.textContent='❌ Sin internet en este momento.';
+    else res.textContent='❌ No se pudo conectar a esa URL. Verificá que sea exactamente la que aparece en Firebase Console → Realtime Database. ('+e.message+')';
   }
 }
 
