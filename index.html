@@ -544,7 +544,11 @@
     <div style="font-size:12px;font-weight:700;color:#60a5fa;margin-bottom:10px;">🔄 Sincronización en tiempo real</div>
     <div class="fg">
       <label>URL Firebase Realtime Database <a href="https://console.firebase.google.com" target="_blank" style="color:#60a5fa;font-size:10px;text-transform:none;letter-spacing:0;">Configurar →</a></label>
-      <input id="sFirebaseUrl" type="url" placeholder="https://tu-proyecto-default-rtdb.firebaseio.com">
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input id="sFirebaseUrl" type="url" placeholder="https://tu-proyecto-default-rtdb.firebaseio.com" style="flex:1;">
+        <button class="btn btn-s btn-sm" type="button" onclick="testFirebaseUrl()" title="Probar conexión">🔗 Test</button>
+      </div>
+      <div id="fbTestResult" style="font-size:11px;margin-top:5px;display:none;"></div>
     </div>
     <!-- SECCIÓN PARA EL EQUIPO (visible por defecto) -->
     <div style="background:var(--bg3);border-radius:8px;padding:11px 13px;font-size:11px;color:var(--gray);line-height:1.7;margin-bottom:10px;">
@@ -651,11 +655,11 @@ function setSyncBadge(state){
 function save(){
   try{ localStorage.setItem('emaofc_v2', JSON.stringify(S)); }catch(e){}
   const url=getFbUrl(); if(!url) return;
-  setSyncBadge('loading');
   S._device=deviceId; S._ts=Date.now();
   fetch(`${url}/state.json`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(S)})
-    .then(r=>{if(!r.ok) throw new Error(r.status); setSyncBadge('ok');})
+    .then(r=>{ if(!r.ok) throw new Error(r.status); })
     .catch(()=>setSyncBadge('err'));
+  // No seteamos 'loading'/'ok' aquí para no pisar el badge seteado por loadFromFirebase/startRealtime
 }
 
 async function savePhotos(){
@@ -1677,8 +1681,9 @@ function setProgress(pct,label){
 }
 
 async function startAnalysis(file){
+  if(!navigator.onLine){ toast('❌ Sin conexión a internet'); return; }
   const key=getGeminiKey();
-  if(!key){ toast('❌ Configurá tu API Key en ⚙️ Ajustes'); return; }
+  if(!key){ toast('❌ Configurá tu API Key de Gemini en ⚙️ Ajustes'); return; }
   const zone=document.getElementById('uploadZone');
   if(zone) zone.style.pointerEvents='none';
   document.getElementById('mAnalisisFooter').innerHTML=`<button class="btn btn-s" disabled>⏳ Analizando…</button>`;
@@ -1729,7 +1734,8 @@ async function uploadToGemini(key,file,onProgress){
        body:JSON.stringify({file:{display_name:file.name}})}
     );
   }catch(netErr){
-    throw new Error('Error de red al conectar con Gemini. Verificá tu conexión a internet.');
+    if(!navigator.onLine) throw new Error('Sin conexión a internet. Conectate y volvé a intentar.');
+    throw new Error('No se pudo conectar a Gemini ('+netErr.message+'). Verificá que la API Key esté activa en Google AI Studio.');
   }
   if(!initResp.ok){
     const errBody=await initResp.text().catch(()=>'');
@@ -1955,15 +1961,43 @@ function renderReport(data,container,timestamp,focusPlayer,context){
 // ═══════════════════════════════════════════
 // SETTINGS
 // ═══════════════════════════════════════════
+async function testFirebaseUrl(){
+  const raw=document.getElementById('sFirebaseUrl').value.trim().replace(/\/+$/,'');
+  const res=document.getElementById('fbTestResult');
+  res.style.display='block';
+  if(!raw){ res.style.color='var(--gray)'; res.textContent='⚠️ Ingresá una URL primero.'; return; }
+  if(!raw.startsWith('https://')){ res.style.color='var(--red)'; res.textContent='❌ La URL debe empezar con https://'; return; }
+  res.style.color='var(--gray)'; res.textContent='🔄 Probando…';
+  try{
+    const r=await fetch(`${raw}/.json?shallow=true`,{signal:AbortSignal.timeout(8000)});
+    if(r.status===401||r.status===403){
+      res.style.color='var(--red)';
+      res.textContent='❌ Acceso denegado ('+r.status+'). Revisá las reglas de seguridad en Firebase Console → Realtime Database → Rules. Deben ser: .read: true, .write: true';
+    } else if(r.ok){
+      res.style.color='#2ea043';
+      res.textContent='✅ Conexión OK! La URL es correcta.';
+    } else {
+      res.style.color='var(--red)';
+      res.textContent='❌ Error '+r.status+'. Verificá que la URL sea correcta.';
+    }
+  }catch(e){
+    res.style.color='var(--red)';
+    if(!navigator.onLine) res.textContent='❌ Sin internet en este momento.';
+    else res.textContent='❌ No se pudo conectar. URL incorrecta o sin internet. ('+e.message+')';
+  }
+}
+
 function openSettings(){
   document.getElementById('sLogo').value=S.team.logo;
   document.getElementById('sName').value=S.team.name;
   document.getElementById('sSeason').value=S.team.season;
   document.getElementById('sGeminiKey').value=localStorage.getItem('emaofc_gemini')||'';
   document.getElementById('sFirebaseUrl').value=getFbUrl();
+  const res=document.getElementById('fbTestResult');
+  if(res) res.style.display='none';
   open$('mSettings');
 }
-function saveSettings(){
+async function saveSettings(){
   S.team.logo=document.getElementById('sLogo').value||'⚽';
   S.team.name=document.getElementById('sName').value.trim()||'EMAO FC';
   S.team.season=document.getElementById('sSeason').value.trim()||'2025/2026';
@@ -1978,12 +2012,22 @@ function saveSettings(){
   document.getElementById('hName').textContent=S.team.name;
   document.getElementById('hSeason').textContent='Temporada '+S.team.season;
   document.title=S.team.name;
-  save(); close$('mSettings'); renderDash(); toast('✅ Ajustes guardados');
-  // Si cambió la URL de Firebase, recargar desde Firebase y reiniciar SSE
+  // Guardar localmente de inmediato (sin tocar el badge de Firebase)
+  try{ localStorage.setItem('emaofc_v2', JSON.stringify(S)); }catch(e){}
+  close$('mSettings'); renderDash(); toast('✅ Ajustes guardados');
   if(fbUrl!==prevUrl){
     stopRealtime();
-    if(fbUrl){ loadFromFirebase().then(()=>startRealtime()); }
-    else { setSyncBadge('off'); }
+    if(fbUrl){
+      // Primero verificar conexión con Firebase, DESPUÉS subir datos
+      // Esto evita la race condition entre save() y loadFromFirebase()
+      await loadFromFirebase();   // establece badge correctamente
+      startRealtime();
+      save();                     // ahora sí subir — badge ya está seteado por loadFromFirebase
+    } else {
+      setSyncBadge('off');
+    }
+  } else if(fbUrl){
+    save(); // URL sin cambios — save normal
   }
 }
 
