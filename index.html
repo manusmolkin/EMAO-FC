@@ -654,7 +654,7 @@ function save(){
   setSyncBadge('loading');
   S._device=deviceId; S._ts=Date.now();
   fetch(`${url}/state.json`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(S)})
-    .then(()=>setSyncBadge('ok'))
+    .then(r=>{if(!r.ok) throw new Error(r.status); setSyncBadge('ok');})
     .catch(()=>setSyncBadge('err'));
 }
 
@@ -704,10 +704,20 @@ async function loadFromFirebase(){
       fetch(`${url}/state.json`),
       fetch(`${url}/photos.json`)
     ]);
+    if(!sr.ok) throw new Error('State fetch failed: '+sr.status);
     const sd=await sr.json();
-    const pd=await pr.json();
-    if(sd&&sd.players){ S=sd; try{localStorage.setItem('emaofc_v2',JSON.stringify(S));}catch(e){} }
-    if(pd&&typeof pd==='object'){ photos=pd; try{localStorage.setItem('emaofc_photos',JSON.stringify(photos));}catch(e){} }
+    if(sd&&sd.players){
+      S=sd;
+      try{localStorage.setItem('emaofc_v2',JSON.stringify(S));}catch(e){}
+    }
+    if(pr.ok){
+      const pd=await pr.json();
+      if(pd&&typeof pd==='object'&&Object.keys(pd).length>0){
+        photos=pd;
+        try{localStorage.setItem('emaofc_photos',JSON.stringify(photos));}catch(e){}
+        try{await setPhotosIDB(photos);}catch(e){} // ← NUEVO: también guardar en IDB
+      }
+    }
     setSyncBadge('ok');
     renderCurrentSection();
     updateCommentSelect();
@@ -715,7 +725,7 @@ async function loadFromFirebase(){
     document.getElementById('hName').textContent=S.team.name;
     document.getElementById('hSeason').textContent='Temporada '+S.team.season;
     document.title=S.team.name;
-  }catch(e){ setSyncBadge('err'); }
+  }catch(e){ console.warn('loadFromFirebase error:',e); setSyncBadge('err'); }
 }
 
 let _fbEs=null;      // EventSource para state
@@ -741,7 +751,16 @@ function startRealtime(){
       updateCommentSelect();
     }catch(err){}
   });
-  _fbEs.addEventListener('error',function(){ setSyncBadge('err'); });
+  _fbEs.addEventListener('open',function(){ setSyncBadge('ok'); });
+  _fbEs.addEventListener('error',function(){
+    // Solo mostrar 🔴 si la conexión se cerró definitivamente (readyState===2)
+    // Si es 0 (CONNECTING) significa que EventSource está reconectando automáticamente → 🟡
+    if(_fbEs.readyState===EventSource.CLOSED){
+      setSyncBadge('err');
+    } else {
+      setSyncBadge('loading'); // reconectando…
+    }
+  });
 
   // ── Listener de fotos (se actualiza independientemente) ──
   _fbEsPhotos=new EventSource(`${url}/photos.json`);
@@ -751,12 +770,15 @@ function startRealtime(){
       const d=msg.data;
       if(!d||typeof d!=='object') return;
       photos=d;
-      // Guardar en IndexedDB
       setPhotosIDB(photos).catch(err=>console.warn('Error saving photos to IDB',err));
-      // Y en localStorage como fallback
       try{localStorage.setItem('emaofc_photos',JSON.stringify(photos));}catch(e){}
-      renderCurrentSection(); // refresca avatares
+      renderCurrentSection();
     }catch(err){}
+  });
+  _fbEsPhotos.addEventListener('error',function(){
+    if(_fbEsPhotos.readyState===EventSource.CLOSED){
+      setSyncBadge('err');
+    }
   });
 }
 
@@ -1694,37 +1716,56 @@ async function startAnalysis(file){
 }
 
 async function uploadToGemini(key,file,onProgress){
-  const initResp=await fetch(
-    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${key}`,
-    {method:'POST',
-     headers:{'X-Goog-Upload-Protocol':'resumable','X-Goog-Upload-Command':'start',
-               'X-Goog-Upload-Header-Content-Length':file.size,
-               'X-Goog-Upload-Header-Content-Type':file.type||'video/mp4',
-               'Content-Type':'application/json'},
-     body:JSON.stringify({file:{display_name:file.name}})}
-  );
-  if(!initResp.ok) throw new Error(`File API init error: ${initResp.status}`);
+  const mime=file.type||'video/mp4';
+  let initResp;
+  try{
+    initResp=await fetch(
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${key}`,
+      {method:'POST',
+       headers:{'X-Goog-Upload-Protocol':'resumable','X-Goog-Upload-Command':'start',
+                 'X-Goog-Upload-Header-Content-Length':''+file.size,
+                 'X-Goog-Upload-Header-Content-Type':mime,
+                 'Content-Type':'application/json'},
+       body:JSON.stringify({file:{display_name:file.name}})}
+    );
+  }catch(netErr){
+    throw new Error('Error de red al conectar con Gemini. Verificá tu conexión a internet.');
+  }
+  if(!initResp.ok){
+    const errBody=await initResp.text().catch(()=>'');
+    if(initResp.status===400) throw new Error('API Key inválida o solicitud incorrecta. Revisá la key en Ajustes.');
+    if(initResp.status===403) throw new Error('API Key sin permisos. Verificá que esté habilitada en Google AI Studio.');
+    throw new Error(`Error al iniciar subida (${initResp.status}): ${errBody.slice(0,120)}`);
+  }
   const uploadUrl=initResp.headers.get('X-Goog-Upload-URL');
-  if(!uploadUrl) throw new Error('No se recibió URL de subida');
+  if(!uploadUrl) throw new Error('No se recibió URL de subida de Gemini');
   const CHUNK=8*1024*1024;
   let offset=0, fileUri=null;
   while(offset<file.size){
     const chunk=file.slice(offset,offset+CHUNK);
     const isLast=offset+chunk.size>=file.size;
-    const resp=await fetch(uploadUrl,{
-      method:'PUT',
-      headers:{'X-Goog-Upload-Offset':offset,
-               'X-Goog-Upload-Command':isLast?'upload, finalize':'upload',
-               'Content-Type':file.type||'video/mp4'},
-      body:chunk
-    });
+    let resp;
+    try{
+      resp=await fetch(uploadUrl,{
+        method:'PUT',
+        headers:{'X-Goog-Upload-Offset':''+offset,
+                 'X-Goog-Upload-Command':isLast?'upload, finalize':'upload',
+                 'Content-Type':mime},
+        body:chunk
+      });
+    }catch(netErr){
+      throw new Error(`Error de red subiendo el video (${Math.round(offset/file.size*100)}% completado). Intentá de nuevo.`);
+    }
     offset+=chunk.size;
     if(onProgress) onProgress(Math.round(offset/file.size*100));
     if(isLast){
-      if(!resp.ok) throw new Error(`Subida fallida: ${resp.status}`);
+      if(!resp.ok){
+        const errBody=await resp.text().catch(()=>'');
+        throw new Error(`Subida fallida (${resp.status}): ${errBody.slice(0,120)}`);
+      }
       const json=await resp.json();
       fileUri=json.file?.uri;
-      if(!fileUri) throw new Error('Sin URI de archivo en la respuesta');
+      if(!fileUri) throw new Error('Gemini no devolvió URI del archivo. Intentá con un video más corto.');
     }
   }
   return fileUri;
@@ -1986,6 +2027,11 @@ function loadEMAOPlayers(){
 // INIT
 // ═══════════════════════════════════════════
 (async function init(){
+  // 0. Pedir al browser que no borre nuestro storage (crucial en móvil)
+  if(navigator.storage&&navigator.storage.persist){
+    navigator.storage.persist().catch(()=>{});
+  }
+
   // 1. Inicializa IndexedDB
   try{ await initIDB(); }catch(e){ console.warn('IDB init failed',e); }
 
@@ -2008,7 +2054,15 @@ function loadEMAOPlayers(){
 
   // 5. Si hay Firebase configurado, carga desde la nube y arranca SSE
   if(getFbUrl()){
-    await loadFromFirebase();
+    try{
+      await loadFromFirebase();
+    }catch(e){
+      console.warn('Initial Firebase load failed, retrying in 3s…',e);
+      // Retry once after 3 seconds (red móvil lenta)
+      setTimeout(async()=>{
+        try{ await loadFromFirebase(); }catch(e2){ console.warn('Firebase retry failed',e2); }
+      },3000);
+    }
     startRealtime();
   } else {
     setSyncBadge('off');
