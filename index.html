@@ -798,18 +798,30 @@ function ago(ts){
   return `hace ${Math.floor(h/24)}d`;
 }
 
+// Helper: cuenta asistencias de un jugador en un partido (soporta formato viejo y nuevo)
+function assistCount(m,pid){
+  if(!m.assists||!m.assists.length) return 0;
+  if(typeof m.assists[0]==='object') return (m.assists.find(s=>s.id===pid)||{}).n||0;
+  return m.assists.filter(x=>x===pid).length; // formato viejo (checkbox)
+}
+function hasAssist(m,pid){
+  if(!m.assists||!m.assists.length) return false;
+  if(typeof m.assists[0]==='object') return m.assists.some(s=>s.id===pid);
+  return m.assists.includes(pid); // formato viejo
+}
+
 function pstats(pid){
   let g=0,a=0,am=0,ro=0,pj=0,mvps=0;
   S.matches.forEach(m=>{
     if(!m.played) return;
     const inMatch=(m.scorers&&m.scorers.some(s=>s.id===pid))||
-                   (m.assists&&m.assists.includes(pid))||
+                   hasAssist(m,pid)||
                    (m.yellows&&m.yellows.includes(pid))||
                    (m.reds&&m.reds.includes(pid))||
                    (m.mvpWinner===pid);
     if(inMatch) pj++;
     if(m.scorers) m.scorers.forEach(s=>{if(s.id===pid)g+=s.n||1;});
-    if(m.assists) m.assists.forEach(id=>{if(id===pid)a++;});
+    a+=assistCount(m,pid);
     if(m.yellows) m.yellows.forEach(id=>{if(id===pid)am++;});
     if(m.reds)    m.reds.forEach(id=>{if(id===pid)ro++;});
     if(m.mvpWinner===pid) mvps++;
@@ -904,7 +916,7 @@ function renderDash(){
   const gMap={},aMap={};
   played.forEach(m=>{
     (m.scorers||[]).forEach(s=>{gMap[s.id]=(gMap[s.id]||0)+(s.n||1);});
-    (m.assists||[]).forEach(id=>{aMap[id]=(aMap[id]||0)+1;});
+    S.players.forEach(p=>{const n=assistCount(m,p.id);if(n>0)aMap[p.id]=(aMap[p.id]||0)+n;});
   });
   const topG=Object.entries(gMap).map(([id,v])=>({p:S.players.find(x=>x.id===id),v})).filter(x=>x.p).sort((a,b)=>b.v-a.v).slice(0,5);
   const topA=Object.entries(aMap).map(([id,v])=>({p:S.players.find(x=>x.id===id),v})).filter(x=>x.p).sort((a,b)=>b.v-a.v).slice(0,5);
@@ -1069,7 +1081,7 @@ function showPlayerDetail(id){
   const hasPhoto=!!photos[id];
   const history=S.matches.filter(m=>m.played&&(
     (m.scorers&&m.scorers.some(s=>s.id===id))||
-    (m.assists&&m.assists.includes(id))||
+    hasAssist(m,id)||
     (m.yellows&&m.yellows.includes(id))||
     (m.reds&&m.reds.includes(id))||
     m.mvpWinner===id
@@ -1114,7 +1126,7 @@ function showPlayerDetail(id){
       ${history.map(m=>{
         const res=mresult(m),sc={win:'sc-win',draw:'sc-draw',loss:'sc-loss'}[res];
         const g=m.scorers?m.scorers.filter(s=>s.id===id).reduce((a,s)=>a+(s.n||1),0):0;
-        const a=m.assists?m.assists.filter(x=>x===id).length:0;
+        const a=assistCount(m,id);
         const am=m.yellows?m.yellows.filter(x=>x===id).length:0;
         const ro=m.reds?m.reds.filter(x=>x===id).length:0;
         const isMvp=m.mvpWinner===id;
@@ -1209,8 +1221,16 @@ function populateMatchPlayers(match){
       <input type="number" min="0" max="20" value="${eg}" id="g_${p.id}" style="width:58px;text-align:center;padding:4px 6px;">
     </div>`;
   }).join('');
-  ['assistsInput','yellowsInput','redsInput'].forEach((elId,idx)=>{
-    const key=['assists','yellows','reds'][idx];
+  // Asistencias: ahora con número igual que goles
+  document.getElementById('assistsInput').innerHTML=players.map(p=>{
+    const ea=match?assistCount(match,p.id):0;
+    return `<div class="numinput-row">
+      <span class="nlabel">${p.jersey||p.name}</span>
+      <input type="number" min="0" max="20" value="${ea}" id="a_${p.id}" style="width:58px;text-align:center;padding:4px 6px;">
+    </div>`;
+  }).join('');
+  ['yellowsInput','redsInput'].forEach((elId,idx)=>{
+    const key=['yellows','reds'][idx];
     document.getElementById(elId).innerHTML=players.map(p=>{
       const chk=match&&match[key]&&match[key].includes(p.id)?'checked':'';
       return `<div class="chkitem"><input type="checkbox" id="${key}_${p.id}" ${chk}><label for="${key}_${p.id}">${p.jersey||p.name}</label></div>`;
@@ -1274,7 +1294,8 @@ function saveMatch(){
     S.players.forEach(p=>{
       const g=parseInt(document.getElementById('g_'+p.id)?.value||0);
       if(g>0) data.scorers.push({id:p.id,n:g});
-      if(document.getElementById('assists_'+p.id)?.checked) data.assists.push(p.id);
+      const a=parseInt(document.getElementById('a_'+p.id)?.value||0);
+      if(a>0) data.assists.push({id:p.id,n:a});
       if(document.getElementById('yellows_'+p.id)?.checked) data.yellows.push(p.id);
       if(document.getElementById('reds_'+p.id)?.checked)    data.reds.push(p.id);
     });
