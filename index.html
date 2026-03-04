@@ -546,12 +546,23 @@
       <label>URL Firebase Realtime Database <a href="https://console.firebase.google.com" target="_blank" style="color:#60a5fa;font-size:10px;text-transform:none;letter-spacing:0;">Configurar →</a></label>
       <input id="sFirebaseUrl" type="url" placeholder="https://tu-proyecto-default-rtdb.firebaseio.com">
     </div>
-    <div style="background:var(--bg3);border-radius:8px;padding:11px 13px;font-size:11px;color:var(--gray);line-height:1.7;margin-bottom:4px;">
-      <strong style="color:var(--white);">Cómo activarlo (3 min):</strong><br>
+    <!-- SECCIÓN PARA EL EQUIPO (visible por defecto) -->
+    <div style="background:var(--bg3);border-radius:8px;padding:11px 13px;font-size:11px;color:var(--gray);line-height:1.7;margin-bottom:10px;">
+      <strong style="color:var(--white);">👥 Para los integrantes del equipo:</strong><br>
+      Solo tenés que <strong>copiar la URL</strong> que te pasó el admin (Manu) y pegarla arriba. Eso es todo. 🟢
+    </div>
+
+    <!-- SECCIÓN PARA EL ADMIN (colapsable) -->
+    <button id="adminToggle" style="background:none;border:none;color:#60a5fa;font-size:11px;font-weight:700;cursor:pointer;padding:0;margin-bottom:8px;" onclick="document.getElementById('adminSteps').style.display=document.getElementById('adminSteps').style.display==='none'?'block':'none';">
+      ⚙️ Admin: Cómo crear Firebase (mostrar)
+    </button>
+    <div id="adminSteps" style="display:none;background:var(--bg3);border-radius:8px;padding:11px 13px;font-size:11px;color:var(--gray);line-height:1.7;margin-bottom:10px;">
+      <strong style="color:var(--white);">Pasos una sola vez:</strong><br>
       1. Entrá a <a href="https://console.firebase.google.com" target="_blank" style="color:#60a5fa;">console.firebase.google.com</a><br>
       2. Creá un proyecto → <em>Realtime Database</em> → Modo test<br>
-      3. Copiá la URL (ej: <code style="color:#60a5fa;">https://emaofc-rtdb.firebaseio.com</code>)<br>
-      4. Pegala arriba y guardá. ¡Listo! Compartí la URL de GitHub Pages con el equipo.
+      3. Copiá la URL que aparece (ej: <code style="color:#60a5fa;">https://tu-proyecto-default-rtdb.firebaseio.com</code>)<br>
+      4. Pegala arriba y guardá<br>
+      5. Compartí esa URL con el equipo por WhatsApp
     </div>
     <div class="mfooter">
       <button class="btn btn-s" onclick="close$('mSettings')">Cancelar</button>
