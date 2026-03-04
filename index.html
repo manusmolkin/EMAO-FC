@@ -1715,7 +1715,7 @@ async function uploadToGemini(key,file,onProgress){
       method:'PUT',
       headers:{'X-Goog-Upload-Offset':offset,
                'X-Goog-Upload-Command':isLast?'upload, finalize':'upload',
-               'Content-Length':chunk.size,'Content-Type':file.type||'video/mp4'},
+               'Content-Type':file.type||'video/mp4'},
       body:chunk
     });
     offset+=chunk.size;
