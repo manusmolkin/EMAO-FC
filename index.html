@@ -655,10 +655,15 @@ async function loadFromFirebase(){
   }catch(e){ setSyncBadge('err'); }
 }
 
-let _fbEs=null; // EventSource activo
+let _fbEs=null;      // EventSource para state
+let _fbEsPhotos=null; // EventSource para fotos
+
 function startRealtime(){
   if(_fbEs){ _fbEs.close(); _fbEs=null; }
+  if(_fbEsPhotos){ _fbEsPhotos.close(); _fbEsPhotos=null; }
   const url=getFbUrl(); if(!url) return;
+
+  // ── Listener de estado (jugadores, partidos, comentarios) ──
   _fbEs=new EventSource(`${url}/state.json`);
   _fbEs.addEventListener('put',function(e){
     try{
@@ -674,10 +679,24 @@ function startRealtime(){
     }catch(err){}
   });
   _fbEs.addEventListener('error',function(){ setSyncBadge('err'); });
+
+  // ── Listener de fotos (se actualiza independientemente) ──
+  _fbEsPhotos=new EventSource(`${url}/photos.json`);
+  _fbEsPhotos.addEventListener('put',function(e){
+    try{
+      const msg=JSON.parse(e.data);
+      const d=msg.data;
+      if(!d||typeof d!=='object') return;
+      photos=d;
+      try{localStorage.setItem('emaofc_photos',JSON.stringify(photos));}catch(e){}
+      renderCurrentSection(); // refresca avatares
+    }catch(err){}
+  });
 }
 
 function stopRealtime(){
   if(_fbEs){ _fbEs.close(); _fbEs=null; }
+  if(_fbEsPhotos){ _fbEsPhotos.close(); _fbEsPhotos=null; }
 }
 
 function renderCurrentSection(){
