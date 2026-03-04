@@ -590,6 +590,38 @@ let photos = {}; // playerId -> base64 string (stored separately)
 let pFilter='todos', mFilter='todos', mvMode='ranking', voteMid=null, photoUploadPid=null;
 
 // ═══════════════════════════════════════════
+// INDEXEDDB PARA FOTOS (mejor que localStorage)
+// ═══════════════════════════════════════════
+let _idb=null;
+async function initIDB(){
+  return new Promise((r,j)=>{
+    const req=indexedDB.open('emaofc_db',1);
+    req.onerror=()=>j(req.error);
+    req.onsuccess=()=>{_idb=req.result;r();};
+    req.onupgradeneeded=(e)=>{
+      const d=e.target.result;
+      if(!d.objectStoreNames.contains('photos')) d.createObjectStore('photos');
+    };
+  });
+}
+async function getPhotosIDB(){
+  if(!_idb) await initIDB();
+  return new Promise((r,j)=>{
+    const req=_idb.transaction('photos','readonly').objectStore('photos').get('all');
+    req.onerror=()=>j(req.error);
+    req.onsuccess=()=>r(req.result||{});
+  });
+}
+async function setPhotosIDB(ph){
+  if(!_idb) await initIDB();
+  return new Promise((r,j)=>{
+    const req=_idb.transaction('photos','readwrite').objectStore('photos').put(ph,'all');
+    req.onerror=()=>j(req.error);
+    req.onsuccess=()=>r();
+  });
+}
+
+// ═══════════════════════════════════════════
 // STORAGE
 // ═══════════════════════════════════════════
 function getFbUrl(){ return (localStorage.getItem('emaofc_firebase')||'').replace(/\/+$/,''); }
@@ -615,8 +647,12 @@ function save(){
     .catch(()=>setSyncBadge('err'));
 }
 
-function savePhotos(){
+async function savePhotos(){
+  // 1. Guardar en IndexedDB (principal — mucho espacio, mejor persistencia)
+  try{ await setPhotosIDB(photos); }catch(e){ console.warn('IDB save failed',e); }
+  // 2. También en localStorage como fallback
   try{ localStorage.setItem('emaofc_photos', JSON.stringify(photos)); }catch(e){}
+  // 3. Y sincronizar con Firebase si está configurado
   const url=getFbUrl(); if(!url) return;
   fetch(`${url}/photos.json`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(photos)})
     .catch(()=>{});
@@ -626,10 +662,26 @@ function load(){
   try{
     const d=localStorage.getItem('emaofc_v2');
     if(d){ S=JSON.parse(d); }
-    const ph=localStorage.getItem('emaofc_photos');
-    if(ph){ photos=JSON.parse(ph); }
+    // Para fotos, se cargan de IndexedDB en init() (async)
     return !!d;
   }catch(e){ return false; }
+}
+
+// Carga fotos de IndexedDB (prioridad) o localStorage (fallback)
+async function loadPhotosLocal(){
+  try{
+    const ph=await getPhotosIDB();
+    if(ph && typeof ph==='object' && Object.keys(ph).length>0){
+      photos=ph;
+      return true;
+    }
+  }catch(e){}
+  // Fallback a localStorage
+  try{
+    const ph=localStorage.getItem('emaofc_photos');
+    if(ph){ photos=JSON.parse(ph); return true; }
+  }catch(e){}
+  return false;
 }
 
 // Carga los datos de Firebase y re-renderiza (async)
@@ -688,6 +740,9 @@ function startRealtime(){
       const d=msg.data;
       if(!d||typeof d!=='object') return;
       photos=d;
+      // Guardar en IndexedDB
+      setPhotosIDB(photos).catch(err=>console.warn('Error saving photos to IDB',err));
+      // Y en localStorage como fallback
       try{localStorage.setItem('emaofc_photos',JSON.stringify(photos));}catch(e){}
       renderCurrentSection(); // refresca avatares
     }catch(err){}
@@ -1899,18 +1954,27 @@ function loadEMAOPlayers(){
 // INIT
 // ═══════════════════════════════════════════
 (async function init(){
-  // 1. Carga local (rápida, inmediata)
+  // 1. Inicializa IndexedDB
+  try{ await initIDB(); }catch(e){ console.warn('IDB init failed',e); }
+
+  // 2. Carga estado local (rápida, inmediata)
   const ok=load();
   if(!ok||!S.players.length){ loadEMAOPlayers(); save(); }
   const toti=S.players.find(p=>p.jersey==='TOTONO');
   if(toti&&toti.name==='TOTI'){ toti.name='TOTI CASSAB'; save(); }
+
+  // 3. Carga fotos locales (de IndexedDB o localStorage)
+  await loadPhotosLocal();
+
+  // 4. Actualiza header y UI
   document.getElementById('hLogo').textContent=S.team.logo;
   document.getElementById('hName').textContent=S.team.name;
   document.getElementById('hSeason').textContent='Temporada '+S.team.season;
   document.title=S.team.name;
   updateCommentSelect();
   renderDash();
-  // 2. Si hay Firebase configurado, carga desde la nube y arranca SSE
+
+  // 5. Si hay Firebase configurado, carga desde la nube y arranca SSE
   if(getFbUrl()){
     await loadFromFirebase();
     startRealtime();
