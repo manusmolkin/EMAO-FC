@@ -1958,6 +1958,15 @@ No incluyas ningún texto fuera del JSON. No uses markdown ni bloques de código
   if(!r.ok){
     const err=await r.text();
     console.error('callGemini error:',r.status,err.slice(0,300));
+    if(r.status===429){
+      throw new Error('Cuota de Gemini agotada (429). El análisis de video requiere el plan de pago de Google AI. Solución: activá billing en console.cloud.google.com → seleccioná tu proyecto → "Facturación" → vinculá una tarjeta. El costo es ~$0.10 por video analizado.');
+    }
+    if(r.status===400){
+      throw new Error('Error en la solicitud a Gemini (400). Si usaste YouTube, verificá que el video sea público o no listado (no privado).');
+    }
+    if(r.status===403){
+      throw new Error('API Key sin permisos (403). Verificá que la Generative Language API esté habilitada en tu proyecto de Google Cloud.');
+    }
     throw new Error(`Gemini API ${r.status}: ${err.slice(0,200)}`);
   }
   const json=await r.json();
