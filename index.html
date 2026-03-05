@@ -1671,14 +1671,31 @@ function showUploadForm(){
       <label>Contexto adicional (opcional)</label>
       <textarea id="aContext" placeholder="Ej: jugamos con lluvia, formación 4-3-3, faltó el portero…" style="min-height:58px;"></textarea>
     </div>
-    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('videoInput').click()"
-         ondragover="event.preventDefault();this.classList.add('drag')"
-         ondragleave="this.classList.remove('drag')"
-         ondrop="handleVideoDrop(event)">
-      <div class="upload-zone-icon">🎬</div>
-      <div class="upload-zone-text">Hacé clic o arrastrá el video del partido</div>
-      <div class="upload-zone-sub">MP4, MOV, AVI · máx. ~1 GB recomendado</div>
+
+    <!-- OPCIÓN A: YouTube URL (recomendada) -->
+    <div style="background:var(--bg3);border-radius:10px;padding:12px 14px;margin-bottom:10px;">
+      <div style="font-size:12px;font-weight:700;color:#60a5fa;margin-bottom:8px;">▶️ Opción A — YouTube (recomendada)</div>
+      <div style="font-size:11px;color:var(--gray);margin-bottom:8px;">Subí el video a YouTube (puede ser <em>No listado</em>) y pegá el link acá. No tiene límite de tamaño.</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input id="aYoutubeUrl" type="url" placeholder="https://www.youtube.com/watch?v=..." style="flex:1;font-size:12px;">
+        <button class="btn btn-p btn-sm" onclick="startAnalysisFromUrl()">Analizar</button>
+      </div>
     </div>
+
+    <!-- OPCIÓN B: Subir archivo directo (puede fallar por CORS en algunos navegadores) -->
+    <div style="background:var(--bg3);border-radius:10px;padding:12px 14px;margin-bottom:10px;">
+      <div style="font-size:12px;font-weight:700;color:var(--gray);margin-bottom:8px;">📁 Opción B — Subir archivo (clips cortos)</div>
+      <div style="font-size:11px;color:var(--gray);margin-bottom:8px;">Puede no funcionar en todos los navegadores. Si falla, usá la Opción A.</div>
+      <div class="upload-zone" id="uploadZone" onclick="document.getElementById('videoInput').click()"
+           ondragover="event.preventDefault();this.classList.add('drag')"
+           ondragleave="this.classList.remove('drag')"
+           ondrop="handleVideoDrop(event)">
+        <div class="upload-zone-icon">🎬</div>
+        <div class="upload-zone-text">Hacé clic o arrastrá el video</div>
+        <div class="upload-zone-sub">MP4, MOV, AVI</div>
+      </div>
+    </div>
+
     <div id="uploadProgress" style="display:none;margin-top:10px;">
       <div class="progress-bar"><div class="progress-fill" id="pFill" style="width:0%"></div></div>
       <div class="progress-label" id="pLabel">Preparando…</div>
@@ -1699,6 +1716,44 @@ function handleVideoInput(e){
   if(file) startAnalysis(file);
   e.target.value='';
 }
+
+// ── Analizar via YouTube URL ──
+async function startAnalysisFromUrl(){
+  const key=localStorage.getItem('emaofc_gemini');
+  if(!key){ toast('❌ Configurá tu API Key de Gemini en ⚙️ Ajustes'); return; }
+  const url=(document.getElementById('aYoutubeUrl')?.value||'').trim();
+  if(!url){ toast('❌ Pegá una URL de YouTube primero'); return; }
+  if(!url.includes('youtube.com/') && !url.includes('youtu.be/')){
+    toast('❌ La URL debe ser de YouTube (youtube.com o youtu.be)'); return;
+  }
+  const zone=document.getElementById('uploadZone');
+  if(zone) zone.style.pointerEvents='none';
+  document.getElementById('mAnalisisFooter').innerHTML=`<button class="btn btn-s" disabled>⏳ Analizando…</button>`;
+  const focusPlayer=document.getElementById('aFocusPlayer')?.value||'';
+  const context=document.getElementById('aContext')?.value.trim()||'';
+  try{
+    setProgress(30,'Enviando a Gemini…');
+    setStatus('🎬 Procesando video de YouTube con IA… (puede tardar 1-2 min)');
+    const m=S.matches.find(x=>x.id===analysisMatchId);
+    const data=await callGemini(key, url, m, focusPlayer, context, true);
+    setProgress(100,'✅ Análisis completo');
+    m.analysis={fileUri:url,data,timestamp:Date.now(),focusPlayer,context};
+    save();
+    toast('✅ Análisis completado');
+    const body=document.getElementById('mAnalisisBody');
+    if(body) renderReport(data,body,m.analysis.timestamp,focusPlayer,context);
+    document.getElementById('mAnalisisFooter').innerHTML=`
+      <button class="btn btn-s" onclick="close$('mAnalisis')">Cerrar</button>
+      <button class="btn btn-gold btn-sm" onclick="showUploadForm()">🔄 Re-analizar</button>`;
+    renderAnalisis();
+  }catch(err){
+    setProgress(0,'');
+    setStatus('❌ '+err.message,true);
+    document.getElementById('mAnalisisFooter').innerHTML=`<button class="btn btn-s" onclick="close$('mAnalisis')">Cancelar</button>`;
+    if(zone) zone.style.pointerEvents='';
+  }
+}
+
 function setStatus(msg,isErr=false){
   const el=document.getElementById('analysisStatus');
   if(el) el.innerHTML=`<span style="color:${isErr?'var(--red)':'var(--gray)'}">${msg}</span>`;
@@ -1776,9 +1831,10 @@ async function uploadToGemini(key,file,onProgress){
     );
     console.log('POST /upload response:',initResp.status,initResp.statusText);
   }catch(netErr){
-    console.error('Fetch error:',netErr);
+    console.error('Fetch error al iniciar upload:',netErr);
     if(!navigator.onLine) throw new Error('Sin conexión a internet. Conectate y volvé a intentar.');
-    throw new Error('No se pudo conectar a Gemini. Verificá tu conexión e intentá de nuevo. ('+netErr.message+')');
+    // El upload directo desde el navegador puede fallar por restricciones CORS
+    throw new Error('La subida de video falló por restricciones del navegador (CORS). Usá la Opción A: subí el video a YouTube como "No listado" y pegá el link. ('+netErr.message+')');
   }
   if(!initResp.ok){
     const errBody=await initResp.text().catch(()=>'');
@@ -1851,7 +1907,7 @@ async function waitForActive(key,fileUri){
   throw new Error('Timeout: Gemini tardó demasiado. El video puede ser muy largo.');
 }
 
-async function callGemini(key,fileUri,match,focusPlayer,context){
+async function callGemini(key,fileUri,match,focusPlayer,context,isYouTube=false){
   const teamCtx=`Equipo: EMAO FC vs ${match.rival} · Fecha: ${match.date} · Resultado: ${match.scoreUs}-${match.scoreThem}.
 Plantilla EMAO FC: ${S.players.map(p=>`${p.jersey}(${p.position})`).join(', ')}.
 ${focusPlayer?`Prestá atención especial al jugador ${focusPlayer}.`:''}${context?`\nContexto: ${context}`:''}`;
@@ -1887,7 +1943,10 @@ ${teamCtx}
 No incluyas ningún texto fuera del JSON. No uses markdown ni bloques de código.`;
   const body={
     contents:[{parts:[
-      {file_data:{mime_type:fileUri.includes('mp4')?'video/mp4':'video/quicktime',file_uri:fileUri}},
+      // YouTube URLs no necesitan mime_type; File API URIs sí
+      isYouTube
+        ? {file_data:{file_uri:fileUri}}
+        : {file_data:{mime_type:fileUri.includes('mp4')?'video/mp4':'video/quicktime',file_uri:fileUri}},
       {text:prompt}
     ]}],
     generationConfig:{responseMimeType:'application/json',temperature:0.25}
