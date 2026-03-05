@@ -710,7 +710,9 @@ async function loadFromFirebase(){
     ]);
     if(!sr.ok) throw new Error('State fetch failed: '+sr.status);
     const sd=await sr.json();
-    if(sd&&sd.players){
+    // Solo sobreescribir S si Firebase tiene jugadores reales (length>0)
+    // Esto evita que un estado vacío/corrupto en Firebase pise los datos locales
+    if(sd&&Array.isArray(sd.players)&&sd.players.length>0){
       S=sd;
       try{localStorage.setItem('emaofc_v2',JSON.stringify(S));}catch(e){}
     }
@@ -746,7 +748,8 @@ function startRealtime(){
     try{
       const msg=JSON.parse(e.data);
       const d=msg.data;
-      if(!d||!d.players) return;
+      // Ignorar si no tiene jugadores reales (evita sobreescribir con estado vacío)
+      if(!d||!Array.isArray(d.players)||!d.players.length) return;
       if(d._device===deviceId) return; // ignorar cambios propios
       S=d;
       try{localStorage.setItem('emaofc_v2',JSON.stringify(S));}catch(e){}
@@ -2101,7 +2104,10 @@ function loadEMAOPlayers(){
 
   // 2. Carga estado local (rápida, inmediata)
   const ok=load();
-  if(!ok||!S.players.length){ loadEMAOPlayers(); save(); }
+  // Reiniciar jugadores si el estado guardado está vacío o corrupto
+  if(!ok||!S.players||!Array.isArray(S.players)||!S.players.length){
+    loadEMAOPlayers(); save();
+  }
   const toti=S.players.find(p=>p.jersey==='TOTONO');
   if(toti&&toti.name==='TOTI'){ toti.name='TOTI CASSAB'; save(); }
 
