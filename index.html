@@ -568,6 +568,10 @@
       4. Pegala arriba y guardá<br>
       5. Compartí esa URL con el equipo por WhatsApp
     </div>
+    <hr style="border-color:var(--border);margin:14px 0 10px;">
+    <div style="text-align:center;">
+      <button class="btn btn-s btn-sm" style="color:#ef4444;border-color:#ef4444;font-size:11px;" onclick="resetApp()">🔄 Restablecer app (borrar todo)</button>
+    </div>
     <div class="mfooter">
       <button class="btn btn-s" onclick="close$('mSettings')">Cancelar</button>
       <button class="btn btn-p" onclick="saveSettings()">Guardar</button>
@@ -593,6 +597,11 @@ const deviceId = (()=>{
 })();
 
 // ═══════════════════════════════════════════
+// VERSION — sube este número para forzar re-init si el estado guardado es incompatible
+// ═══════════════════════════════════════════
+const APP_VERSION = '4';
+
+// ═══════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════
 let S = {
@@ -603,6 +612,19 @@ let S = {
 };
 let photos = {}; // playerId -> base64 string (stored separately)
 let pFilter='todos', mFilter='todos', mvMode='ranking', voteMid=null, photoUploadPid=null;
+
+// Garantiza que S siempre tiene la estructura correcta, sin importar lo que venga de localStorage o Firebase
+function sanitizeState(s){
+  if(!s || typeof s !== 'object') s = {};
+  if(!s.team || typeof s.team !== 'object') s.team = {};
+  if(!s.team.name)   s.team.name   = 'EMAO FC';
+  if(!s.team.logo)   s.team.logo   = '⚽';
+  if(!s.team.season) s.team.season = '2025/2026';
+  if(!Array.isArray(s.players))  s.players  = [];
+  if(!Array.isArray(s.matches))  s.matches  = [];
+  if(!Array.isArray(s.comments)) s.comments = [];
+  return s;
+}
 
 // ═══════════════════════════════════════════
 // INDEXEDDB PARA FOTOS (mejor que localStorage)
@@ -675,9 +697,16 @@ async function savePhotos(){
 
 function load(){
   try{
-    const d=localStorage.getItem('emaofc_v2');
-    if(d){ S=JSON.parse(d); }
-    // Para fotos, se cargan de IndexedDB en init() (async)
+    const savedVer = localStorage.getItem('emaofc_version');
+    const d = localStorage.getItem('emaofc_v2');
+    if(d){
+      S = sanitizeState(JSON.parse(d));
+      // Si la versión cambió, marcar que se necesita reiniciar jugadores
+      // (no borramos datos existentes, solo nos aseguramos de que haya jugadores)
+      if(savedVer !== APP_VERSION){
+        localStorage.setItem('emaofc_version', APP_VERSION);
+      }
+    }
     return !!d;
   }catch(e){ return false; }
 }
@@ -711,9 +740,9 @@ async function loadFromFirebase(){
     if(!sr.ok) throw new Error('State fetch failed: '+sr.status);
     const sd=await sr.json();
     // Solo sobreescribir S si Firebase tiene jugadores reales (length>0)
-    // Esto evita que un estado vacío/corrupto en Firebase pise los datos locales
-    if(sd&&Array.isArray(sd.players)&&sd.players.length>0){
-      S=sd;
+    const sdClean = sanitizeState(sd);
+    if(sdClean.players.length > 0){
+      S = sdClean;
       try{localStorage.setItem('emaofc_v2',JSON.stringify(S));}catch(e){}
     }
     if(pr.ok){
@@ -2020,6 +2049,40 @@ function openSettings(){
   if(res) res.style.display='none';
   open$('mSettings');
 }
+function resetApp(){
+  if(!confirm('⚠️ ¿Borrar todos los datos locales y restablecer la app? Esto no borra Firebase.')) return;
+  // Limpia localStorage (estado y fotos, mantiene las claves de Firebase/Gemini)
+  localStorage.removeItem('emaofc_v2');
+  localStorage.removeItem('emaofc_v2_backup');
+  localStorage.removeItem('emaofc_photos');
+  localStorage.removeItem('emaofc_version');
+  // Limpia IndexedDB
+  try{
+    const req=indexedDB.open('emaofc_idb',1);
+    req.onsuccess=function(ev){
+      const db=ev.target.result;
+      if(db.objectStoreNames.contains('photos')){
+        const tx=db.transaction('photos','readwrite');
+        tx.objectStore('photos').clear();
+      }
+    };
+  }catch(e){}
+  // Reinicia estado
+  S={team:{name:'EMAO FC',logo:'⚽',season:'2025/2026'},players:[],matches:[],comments:[]};
+  loadEMAOPlayers();
+  try{ localStorage.setItem('emaofc_v2',JSON.stringify(S)); }catch(e){}
+  try{ localStorage.setItem('emaofc_version',APP_VERSION); }catch(e){}
+  photos={};
+  close$('mSettings');
+  document.getElementById('hLogo').textContent=S.team.logo;
+  document.getElementById('hName').textContent=S.team.name;
+  document.getElementById('hSeason').textContent='Temporada '+S.team.season;
+  document.title=S.team.name;
+  updateCommentSelect();
+  renderDash();
+  toast('✅ App restablecida con los jugadores originales');
+}
+
 async function saveSettings(){
   S.team.logo=document.getElementById('sLogo').value||'⚽';
   S.team.name=document.getElementById('sName').value.trim()||'EMAO FC';
@@ -2106,7 +2169,9 @@ function loadEMAOPlayers(){
   const ok=load();
   // Reiniciar jugadores si el estado guardado está vacío o corrupto
   if(!ok||!S.players||!Array.isArray(S.players)||!S.players.length){
-    loadEMAOPlayers(); save();
+    loadEMAOPlayers();
+    try{ localStorage.setItem('emaofc_version',APP_VERSION); }catch(e){}
+    save();
   }
   const toti=S.players.find(p=>p.jersey==='TOTONO');
   if(toti&&toti.name==='TOTI'){ toti.name='TOTI CASSAB'; save(); }
@@ -2115,12 +2180,14 @@ function loadEMAOPlayers(){
   await loadPhotosLocal();
 
   // 4. Actualiza header y UI
-  document.getElementById('hLogo').textContent=S.team.logo;
-  document.getElementById('hName').textContent=S.team.name;
-  document.getElementById('hSeason').textContent='Temporada '+S.team.season;
-  document.title=S.team.name;
-  updateCommentSelect();
-  renderDash();
+  try{
+    document.getElementById('hLogo').textContent=S.team.logo;
+    document.getElementById('hName').textContent=S.team.name;
+    document.getElementById('hSeason').textContent='Temporada '+S.team.season;
+    document.title=S.team.name;
+    updateCommentSelect();
+    renderDash();
+  }catch(e){ console.error('init renderDash error:',e); }
 
   // 5. Si hay Firebase configurado, carga desde la nube y arranca SSE
   if(getFbUrl()){
