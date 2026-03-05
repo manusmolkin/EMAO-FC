@@ -1753,37 +1753,44 @@ async function startAnalysis(file){
 }
 
 async function uploadToGemini(key,file,onProgress){
+  // Validar que la API key esté presente y no vacía
+  if(!key||!key.trim()) throw new Error('API Key de Gemini no configurada. Entrá en ⚙️ Ajustes y pegá tu clave.');
+
   const mime=file.type||'video/mp4';
 
   // ── PASO 1: iniciar subida resumible ──
-  // Nota: usamos x-goog-api-key como header (igual que el SDK oficial) en vez de URL param,
-  // y eliminamos X-Goog-Upload-Header-* que no son necesarios y rompen CORS en Safari.
+  // Pasando API key como parámetro URL (?key=...) en lugar de header (evita CORS issues en Safari)
   let initResp;
   try{
+    const reqBody=JSON.stringify({file:{display_name:file.name, mimeType:mime}});
+    console.log('POST /upload con body:',reqBody.slice(0,80));
     initResp=await fetch(
-      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable`,
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${encodeURIComponent(key)}`,
       {method:'POST',
        headers:{
-         'x-goog-api-key': key,
          'X-Goog-Upload-Protocol': 'resumable',
          'X-Goog-Upload-Command': 'start',
          'Content-Type': 'application/json'
        },
-       body:JSON.stringify({file:{display_name:file.name, mimeType:mime}})}
+       body:reqBody}
     );
+    console.log('POST /upload response:',initResp.status,initResp.statusText);
   }catch(netErr){
+    console.error('Fetch error:',netErr);
     if(!navigator.onLine) throw new Error('Sin conexión a internet. Conectate y volvé a intentar.');
     throw new Error('No se pudo conectar a Gemini. Verificá tu conexión e intentá de nuevo. ('+netErr.message+')');
   }
   if(!initResp.ok){
     const errBody=await initResp.text().catch(()=>'');
-    if(initResp.status===400) throw new Error('API Key inválida. Revisá que la copiaste completa en ⚙️ Ajustes.');
+    console.error('Upload init error response:',initResp.status,errBody.slice(0,200));
+    if(initResp.status===400) throw new Error('API Key inválida o body incorrecto. Verificá tu API Key en ⚙️ Ajustes.');
     if(initResp.status===401) throw new Error('API Key inválida o vencida. Generá una nueva en Google AI Studio.');
-    if(initResp.status===403) throw new Error('API Key sin permisos para usar la File API. En Google AI Studio verificá que el proyecto tenga la Generative Language API habilitada.');
-    if(initResp.status===429) throw new Error('Límite de requests alcanzado. Esperá un minuto y volvé a intentar.');
+    if(initResp.status===403) throw new Error('API Key sin permisos. En Google AI Studio habilitá la Generative Language API.');
+    if(initResp.status===429) throw new Error('Límite de requests alcanzado. Esperá 1 minuto y volvé a intentar.');
     throw new Error(`Error iniciando subida (${initResp.status}): ${errBody.slice(0,120)}`);
   }
   const uploadUrl=initResp.headers.get('X-Goog-Upload-URL');
+  console.log('Upload URL received:',uploadUrl?'✓':'✗');
   if(!uploadUrl) throw new Error('Gemini no devolvió URL de subida. Intentá de nuevo.');
 
   // ── PASO 2: subir el archivo en chunks ──
@@ -1794,6 +1801,7 @@ async function uploadToGemini(key,file,onProgress){
     const isLast=offset+chunk.size>=file.size;
     let resp;
     try{
+      console.log(`PUT chunk ${offset}-${offset+chunk.size} of ${file.size}, ${isLast?'finalize':'continue'}`);
       resp=await fetch(uploadUrl,{
         method:'PUT',
         headers:{
@@ -1803,7 +1811,9 @@ async function uploadToGemini(key,file,onProgress){
         },
         body:chunk
       });
+      console.log(`PUT response: ${resp.status}`);
     }catch(netErr){
+      console.error('PUT fetch error:',netErr);
       throw new Error(`Se cortó la conexión al ${Math.round(offset/file.size*100)}%. Intentá de nuevo con mejor señal.`);
     }
     offset+=chunk.size;
@@ -1811,6 +1821,7 @@ async function uploadToGemini(key,file,onProgress){
     if(isLast){
       if(!resp.ok){
         const errBody=await resp.text().catch(()=>'');
+        console.error('Final PUT error:',resp.status,errBody.slice(0,200));
         throw new Error(`Subida fallida en el último paso (${resp.status}): ${errBody.slice(0,120)}`);
       }
       const json=await resp.json();
@@ -1824,13 +1835,18 @@ async function uploadToGemini(key,file,onProgress){
 async function waitForActive(key,fileUri){
   const name=fileUri.split('/files/')[1]||fileUri.split('/').pop();
   for(let i=0;i<40;i++){
-    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/files/${name}`,
-      {headers:{'x-goog-api-key':key}});
-    if(!r.ok) throw new Error('Error verificando estado del archivo ('+r.status+')');
-    const f=await r.json();
-    if(f.state==='ACTIVE') return;
-    if(f.state==='FAILED') throw new Error('Gemini no pudo procesar el video. Intentá con otro formato (MP4 recomendado).');
-    await new Promise(res=>setTimeout(res,5000));
+    try{
+      const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/files/${name}?key=${encodeURIComponent(key)}`);
+      if(!r.ok) throw new Error('Error verificando estado del archivo ('+r.status+')');
+      const f=await r.json();
+      if(f.state==='ACTIVE') return;
+      if(f.state==='FAILED') throw new Error('Gemini no pudo procesar el video. Intentá con otro formato (MP4 recomendado).');
+      await new Promise(res=>setTimeout(res,5000));
+    }catch(e){
+      console.warn('waitForActive attempt',i+1,'failed:',e.message);
+      if(i===39) throw e;
+      await new Promise(res=>setTimeout(res,1000));
+    }
   }
   throw new Error('Timeout: Gemini tardó demasiado. El video puede ser muy largo.');
 }
@@ -1877,11 +1893,12 @@ No incluyas ningún texto fuera del JSON. No uses markdown ni bloques de código
     generationConfig:{responseMimeType:'application/json',temperature:0.25}
   };
   const r=await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`,
-    {method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':key},body:JSON.stringify(body)}
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(key)}`,
+    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}
   );
   if(!r.ok){
     const err=await r.text();
+    console.error('callGemini error:',r.status,err.slice(0,300));
     throw new Error(`Gemini API ${r.status}: ${err.slice(0,200)}`);
   }
   const json=await r.json();
