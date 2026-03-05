@@ -537,8 +537,19 @@
     <div class="fg"><label>Nombre del equipo</label><input id="sName" type="text" placeholder="EMAO FC"></div>
     <div class="fg"><label>Temporada</label><input id="sSeason" type="text" placeholder="2025/2026"></div>
     <div class="fg">
-      <label>API Key de Gemini <a href="https://aistudio.google.com/apikey" target="_blank" style="color:#60a5fa;font-size:10px;text-transform:none;letter-spacing:0;">Obtener gratis →</a></label>
+      <label>API Key de Gemini <a href="https://aistudio.google.com/apikey" target="_blank" style="color:#60a5fa;font-size:10px;text-transform:none;letter-spacing:0;">Obtener →</a></label>
       <input id="sGeminiKey" type="password" placeholder="AIzaSy...">
+    </div>
+    <div class="fg">
+      <label>Modelo Gemini <span style="font-size:10px;color:var(--gray);font-weight:400;">(si un modelo falla, probá el siguiente)</span></label>
+      <select id="sGeminiModel">
+        <option value="gemini-1.5-flash-latest">gemini-1.5-flash-latest (recomendado)</option>
+        <option value="gemini-1.5-flash-001">gemini-1.5-flash-001</option>
+        <option value="gemini-1.5-flash-002">gemini-1.5-flash-002</option>
+        <option value="gemini-1.5-pro-latest">gemini-1.5-pro-latest (mejor calidad)</option>
+        <option value="gemini-2.0-flash-001">gemini-2.0-flash-001 (nuevo)</option>
+        <option value="gemini-2.0-flash-lite-001">gemini-2.0-flash-lite-001</option>
+      </select>
     </div>
     <hr style="border-color:var(--border);margin:6px 0 14px;">
     <div style="font-size:12px;font-weight:700;color:#60a5fa;margin-bottom:10px;">🔄 Sincronización en tiempo real</div>
@@ -1907,6 +1918,15 @@ async function waitForActive(key,fileUri){
   throw new Error('Timeout: Gemini tardó demasiado. El video puede ser muy largo.');
 }
 
+// Modelos fallback ordenados de más a menos disponibles
+const GEMINI_FALLBACK_MODELS=[
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-flash-002',
+  'gemini-1.5-flash-001',
+  'gemini-1.5-pro-latest',
+  'gemini-2.0-flash-001',
+];
+
 async function callGemini(key,fileUri,match,focusPlayer,context,isYouTube=false){
   const teamCtx=`Equipo: EMAO FC vs ${match.rival} · Fecha: ${match.date} · Resultado: ${match.scoreUs}-${match.scoreThem}.
 Plantilla EMAO FC: ${S.players.map(p=>`${p.jersey}(${p.position})`).join(', ')}.
@@ -1951,22 +1971,31 @@ No incluyas ningún texto fuera del JSON. No uses markdown ni bloques de código
     ]}],
     generationConfig:{responseMimeType:'application/json',temperature:0.25}
   };
-  const r=await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key)}`,
-    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}
-  );
+  // Intentar con el modelo configurado; si falla con 404, probar los fallback automáticamente
+  const preferredModel=localStorage.getItem('emaofc_gemini_model')||'gemini-1.5-flash-latest';
+  const modelsToTry=[preferredModel,...GEMINI_FALLBACK_MODELS.filter(m=>m!==preferredModel)];
+  let r, usedModel;
+  for(const model of modelsToTry){
+    console.log('Trying model:',model);
+    r=await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+      {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}
+    );
+    if(r.status!==404){ usedModel=model; break; } // 404 = modelo no disponible, probar el siguiente
+    console.warn('Model',model,'not found, trying next…');
+  }
+  if(!r||!usedModel) throw new Error('Ningún modelo Gemini está disponible para tu cuenta. Verificá tu API Key y el proyecto en Google Cloud.');
+  if(usedModel!==preferredModel){
+    // Guardar el modelo que funcionó para la próxima vez
+    localStorage.setItem('emaofc_gemini_model',usedModel);
+    toast(`ℹ️ Usando modelo ${usedModel} (guardado en Ajustes)`);
+  }
   if(!r.ok){
     const err=await r.text();
     console.error('callGemini error:',r.status,err.slice(0,300));
-    if(r.status===429){
-      throw new Error('Cuota de Gemini agotada (429). El análisis de video requiere el plan de pago de Google AI. Solución: activá billing en console.cloud.google.com → seleccioná tu proyecto → "Facturación" → vinculá una tarjeta. El costo es ~$0.10 por video analizado.');
-    }
-    if(r.status===400){
-      throw new Error('Error en la solicitud a Gemini (400). Si usaste YouTube, verificá que el video sea público o no listado (no privado).');
-    }
-    if(r.status===403){
-      throw new Error('API Key sin permisos (403). Verificá que la Generative Language API esté habilitada en tu proyecto de Google Cloud.');
-    }
+    if(r.status===429) throw new Error('Cuota agotada (429). Activá billing en console.cloud.google.com o esperá unos minutos y volvé a intentar.');
+    if(r.status===400) throw new Error('Error 400. Si usaste YouTube, verificá que el video sea público o "No listado" (no privado).');
+    if(r.status===403) throw new Error('Sin permisos (403). Verificá que la Generative Language API esté habilitada en tu proyecto de Google Cloud.');
     throw new Error(`Gemini API ${r.status}: ${err.slice(0,200)}`);
   }
   const json=await r.json();
@@ -2129,6 +2158,9 @@ function openSettings(){
   document.getElementById('sName').value=S.team.name;
   document.getElementById('sSeason').value=S.team.season;
   document.getElementById('sGeminiKey').value=localStorage.getItem('emaofc_gemini')||'';
+  const savedModel=localStorage.getItem('emaofc_gemini_model')||'gemini-1.5-flash-latest';
+  const modelSel=document.getElementById('sGeminiModel');
+  if(modelSel){ modelSel.value=savedModel; if(!modelSel.value) modelSel.value='gemini-1.5-flash-latest'; }
   document.getElementById('sFirebaseUrl').value=getFbUrl();
   const res=document.getElementById('fbTestResult');
   if(res) res.style.display='none';
@@ -2175,6 +2207,8 @@ async function saveSettings(){
   const gk=document.getElementById('sGeminiKey').value.trim();
   if(gk) localStorage.setItem('emaofc_gemini',gk);
   else localStorage.removeItem('emaofc_gemini');
+  const gm=document.getElementById('sGeminiModel')?.value||'gemini-1.5-flash-latest';
+  localStorage.setItem('emaofc_gemini_model',gm);
   const fbUrl=document.getElementById('sFirebaseUrl').value.trim().replace(/\/+$/,'');
   const prevUrl=getFbUrl();
   if(fbUrl) localStorage.setItem('emaofc_firebase',fbUrl);
