@@ -686,6 +686,12 @@ function setSyncBadge(state){
 function save(){
   try{ localStorage.setItem('emaofc_v2', JSON.stringify(S)); }catch(e){}
   const url=getFbUrl(); if(!url) return;
+  // 🛡️ PROTECCIÓN: si todavía no hicimos loadFromFirebase() exitoso Y los matches están vacíos,
+  // NO sobreescribimos Firebase — podría haber partidos reales guardados en la nube.
+  if(!_fbSynced && (!S.matches||S.matches.length===0)){
+    console.warn('save() bloqueado: esperando sync con Firebase para no pisar datos existentes');
+    return;
+  }
   S._device=deviceId; S._ts=Date.now();
   fetch(`${url}/state.json`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(S)})
     .then(r=>{ if(!r.ok) throw new Error(r.status); })
@@ -762,6 +768,7 @@ async function loadFromFirebase(){
         try{await setPhotosIDB(photos);}catch(e){} // ← NUEVO: también guardar en IDB
       }
     }
+    _fbSynced=true; // ✅ sync exitoso — save() ya puede escribir a Firebase con seguridad
     setSyncBadge('ok');
     renderCurrentSection();
     updateCommentSelect();
@@ -774,6 +781,7 @@ async function loadFromFirebase(){
 
 let _fbEs=null;      // EventSource para state
 let _fbEsPhotos=null; // EventSource para fotos
+let _fbSynced=false; // true una vez que loadFromFirebase() tuvo éxito — evita pisar Firebase con estado vacío
 
 function startRealtime(){
   if(_fbEs){ _fbEs.close(); _fbEs=null; }
@@ -2194,7 +2202,18 @@ function resetApp(){
   document.title=S.team.name;
   updateCommentSelect();
   renderDash();
-  toast('✅ App restablecida con los jugadores originales');
+  // Si hay Firebase configurado, recargar inmediatamente para recuperar partidos y datos reales
+  if(getFbUrl()){
+    toast('🔄 Recargando datos desde Firebase…');
+    loadFromFirebase().then(()=>{
+      startRealtime();
+      toast('✅ Datos recuperados desde Firebase');
+    }).catch(()=>{
+      toast('✅ App restablecida. Recargá la página para sincronizar con Firebase.');
+    });
+  } else {
+    toast('✅ App restablecida con los jugadores originales');
+  }
 }
 
 async function saveSettings(){
@@ -2284,10 +2303,13 @@ function loadEMAOPlayers(){
   // 2. Carga estado local (rápida, inmediata)
   const ok=load();
   // Reiniciar jugadores si el estado guardado está vacío o corrupto
-  if(!ok||!S.players||!Array.isArray(S.players)||!S.players.length){
+  const freshInstall=!ok||!S.players||!Array.isArray(S.players)||!S.players.length;
+  if(freshInstall){
     loadEMAOPlayers();
     try{ localStorage.setItem('emaofc_version',APP_VERSION); }catch(e){}
-    save();
+    // ⚠️ NO llamamos save() si hay Firebase configurado: primero cargamos la nube
+    // para no pisar datos de partidos existentes con un estado local vacío.
+    if(!getFbUrl()){ save(); }
   }
   const toti=S.players.find(p=>p.jersey==='TOTONO');
   if(toti&&toti.name==='TOTI'){ toti.name='TOTI CASSAB'; save(); }
